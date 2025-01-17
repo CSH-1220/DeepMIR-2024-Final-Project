@@ -309,7 +309,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
             the weight scale of image prompt.
     """
 
-    def __init__(self, hidden_size, name, cross_attention_dim=None, num_tokens=4, scale=1.0, do_copy = False):
+    def __init__(self, hidden_size, name, cross_attention_dim=None, num_tokens=4, text_scale = 1.0 , scale=1.0, do_copy = False):
         super().__init__()
 
         if not hasattr(F, "scaled_dot_product_attention"):
@@ -320,6 +320,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
         self.hidden_size = hidden_size
         self.cross_attention_dim = cross_attention_dim
         self.num_tokens = num_tokens
+        self.text_scale = text_scale
         self.scale = scale
         self.to_k_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
         self.to_v_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
@@ -451,7 +452,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
         ip_hidden_states = ip_hidden_states.to(query.dtype)
         # print("hidden_states",hidden_states)
         # print("ip_hidden_states",ip_hidden_states)
-        hidden_states = hidden_states + self.scale * ip_hidden_states
+        hidden_states = self.text_scale * hidden_states + self.scale * ip_hidden_states
         # print("ip_hidden_states",ip_hidden_states.shape)
         # linear proj
         hidden_states = attn.to_out[0](hidden_states)

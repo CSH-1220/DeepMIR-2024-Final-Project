@@ -449,7 +449,7 @@ def plot_loss(loss_history, loss_plot_path, lora_steps):
 # lora_steps: number of lora training step
 # lora_lr: learning rate of lora training
 # lora_rank: the rank of lora
-def train_lora(audio_path ,height ,time_pooling ,freq_pooling ,prompt, negative_prompt, guidance_scale, save_lora_dir, tokenizer=None, tokenizer_2=None,
+def train_lora(audio_path ,dtype ,time_pooling ,freq_pooling ,prompt, negative_prompt, guidance_scale, save_lora_dir, tokenizer=None, tokenizer_2=None,
                text_encoder=None, text_encoder_2=None, GPT2=None, projection_model=None, vocoder=None,
                vae=None, unet=None, noise_scheduler=None, lora_steps=200, lora_lr=2e-4, lora_rank=16, weight_name=None, safe_serialization=False, progress=tqdm):
     time_pooling = time_pooling
@@ -534,7 +534,7 @@ def train_lora(audio_path ,height ,time_pooling ,freq_pooling ,prompt, negative_
                     scale=1.0,
                     num_tokens=8,
                     do_copy = do_copy
-                ).to(device, dtype=torch.float32)
+                ).to(device, dtype=dtype)
             else:
                 unet_lora_attn_procs[name] = AttnProcessor2_0()
     unet.set_attn_processor(unet_lora_attn_procs)
@@ -580,7 +580,7 @@ def train_lora(audio_path ,height ,time_pooling ,freq_pooling ,prompt, negative_
     fbank = torch.zeros((1024, 128))
     ta_kaldi_fbank = extract_kaldi_fbank_feature(waveform, sr, fbank)
     mel_spect_tensor = ta_kaldi_fbank.unsqueeze(0)
-    model = AudioMAEConditionCTPoolRand().to(device).to(dtype=torch.float32)
+    model = AudioMAEConditionCTPoolRand().to(device).to(dtype=dtype)
     model.eval()
     mel_spect_tensor = mel_spect_tensor.to(device, dtype=next(model.parameters()).dtype)
     LOA_embed = model(mel_spect_tensor, time_pool=time_pooling, freq_pool=freq_pooling)
@@ -599,24 +599,6 @@ def train_lora(audio_path ,height ,time_pooling ,freq_pooling ,prompt, negative_
     generated_prompt_embeds = torch.cat([uncond, cond], dim=0)
     model_dtype = next(unet.parameters()).dtype
     generated_prompt_embeds = generated_prompt_embeds.to(model_dtype)
-
-    # num_channels_latents = unet.config.in_channels
-    # batch_size = 1
-    # num_waveforms_per_prompt = 1
-    # generator = None
-    # latents = None
-    # latents = prepare_latents(
-    #         vae,
-    #         vocoder,
-    #         noise_scheduler,
-    #         batch_size * num_waveforms_per_prompt,
-    #         num_channels_latents,
-    #         height,
-    #         prompt_embeds.dtype,
-    #         device,
-    #         generator,
-    #         latents,
-    #     )
     
     loss_history = []
     if not os.path.exists(save_lora_dir):

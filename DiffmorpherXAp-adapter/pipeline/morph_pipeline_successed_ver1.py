@@ -49,58 +49,12 @@ if is_librosa_available():
     import librosa
 import warnings
 import matplotlib.pyplot as plt
-
-
 from .pipeline_audioldm2 import AudioLDM2Pipeline
 
-pipeline_trained = AudioLDM2Pipeline.from_pretrained("cvssp/audioldm2-large", torch_dtype=torch.float32)
-pipeline_trained = pipeline_trained.to("cuda")
-layer_num = 0
-cross = [None, None, 768, 768, 1024, 1024, None, None]
-unet = pipeline_trained.unet
 
-
-attn_procs = {}
-for name in  unet.attn_processors.keys():
-    cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
-    if name.startswith("mid_block"):
-        hidden_size = unet.config.block_out_channels[-1]
-    elif name.startswith("up_blocks"):
-        block_id = int(name[len("up_blocks.")])
-        hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
-    elif name.startswith("down_blocks"):
-        block_id = int(name[len("down_blocks.")])
-        hidden_size = unet.config.block_out_channels[block_id]
-    
-    if cross_attention_dim is None:
-        attn_procs[name] = AttnProcessor2_0()
-    else:
-        cross_attention_dim = cross[layer_num % 8]
-        layer_num += 1
-        if cross_attention_dim == 768:
-            attn_procs[name] = IPAttnProcessor2_0(
-                hidden_size=hidden_size,
-                name=name,
-                cross_attention_dim=cross_attention_dim,
-                scale=0.5,
-                num_tokens=8,
-                do_copy=False
-            ).to("cuda", dtype=torch.float32)
-        else:
-            attn_procs[name] = AttnProcessor2_0()
-
-state_dict = torch.load('/Data/home/Dennis/DeepMIR-2024/Final_Project/AP-adapter/pytorch_model.bin', map_location="cuda")
-for name, processor in attn_procs.items():
-    if hasattr(processor, 'to_v_ip') or hasattr(processor, 'to_k_ip'):
-        weight_name_v = name + ".to_v_ip.weight"
-        weight_name_k = name + ".to_k_ip.weight"
-        processor.to_v_ip.weight = torch.nn.Parameter(state_dict[weight_name_v].half())
-        processor.to_k_ip.weight = torch.nn.Parameter(state_dict[weight_name_k].half())
-
-unet.set_attn_processor(attn_procs)
-unet.to("cuda", dtype=torch.float32)
-
-
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
 def visualize_mel_spectrogram(mel_spect_tensor, output_path=None):
@@ -119,10 +73,6 @@ def visualize_mel_spectrogram(mel_spect_tensor, output_path=None):
         plt.show()
 
 
-warnings.filterwarnings("ignore", category=FutureWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
-
 class StoreProcessor():
     def __init__(self, original_processor, value_dict, name):
         self.original_processor = original_processor
@@ -134,12 +84,9 @@ class StoreProcessor():
     def __call__(self, attn, hidden_states, *args, encoder_hidden_states=None, attention_mask=None, **kwargs):
         # Is self attention
         if encoder_hidden_states is None:
-            # 將 hidden_states 存入 value_dict 中，名稱為 self.name
-            # 如果輸入沒有 encoder_hidden_states，表示是自注意力層，則將輸入的 hidden_states 儲存在 value_dict 中。
             # print(f'In StoreProcessor: {self.name} {self.id}')
             self.value_dict[self.name][self.id] = hidden_states.detach()
             self.id += 1
-        # 調用原始處理器，執行正常的注意力操作
         res = self.original_processor(attn, hidden_states, *args,
                                       encoder_hidden_states=encoder_hidden_states,
                                       attention_mask=attention_mask,
@@ -926,6 +873,60 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
 
         return prompt_embeds, attention_mask, generated_prompt_embeds
 
+    def init_trained_pipeline(self, model_path, device, dtype, ap_scale):
+        pipeline_trained = AudioLDM2Pipeline.from_pretrained("cvssp/audioldm2-large", torch_dtype=dtype).to(device)
+        layer_num = 0
+        cross = [None, None, 768, 768, 1024, 1024, None, None]
+        unet = pipeline_trained.unet
+        attn_procs = {}
+        for name in  unet.attn_processors.keys():
+            cross_attention_dim = None if name.endswith("attn1.processor") else unet.config.cross_attention_dim
+            if name.startswith("mid_block"):
+                hidden_size = unet.config.block_out_channels[-1]
+            elif name.startswith("up_blocks"):
+                block_id = int(name[len("up_blocks.")])
+                hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
+            elif name.startswith("down_blocks"):
+                block_id = int(name[len("down_blocks.")])
+                hidden_size = unet.config.block_out_channels[block_id]
+            
+            if cross_attention_dim is None:
+                attn_procs[name] = AttnProcessor2_0()
+            else:
+                cross_attention_dim = cross[layer_num % 8]
+                layer_num += 1
+                if cross_attention_dim == 768:
+                    attn_procs[name] = IPAttnProcessor2_0(
+                        hidden_size=hidden_size,
+                        name=name,
+                        cross_attention_dim=cross_attention_dim,
+                        scale=ap_scale,
+                        num_tokens=8,
+                        do_copy=False
+                    ).to(device, dtype=dtype)
+                else:
+                    attn_procs[name] = AttnProcessor2_0()
+
+        state_dict = torch.load(model_path, map_location=device)
+        for name, processor in attn_procs.items():
+            if hasattr(processor, 'to_v_ip') or hasattr(processor, 'to_k_ip'):
+                weight_name_v = name + ".to_v_ip.weight"
+                weight_name_k = name + ".to_k_ip.weight"
+                if dtype == torch.float32:
+                    processor.to_v_ip.weight = torch.nn.Parameter(state_dict[weight_name_v].float())
+                    processor.to_k_ip.weight = torch.nn.Parameter(state_dict[weight_name_k].float())
+                elif dtype == torch.float16:
+                    processor.to_v_ip.weight = torch.nn.Parameter(state_dict[weight_name_v].half())
+                    processor.to_k_ip.weight = torch.nn.Parameter(state_dict[weight_name_k].half())
+        unet.set_attn_processor(attn_procs)
+        class _Wrapper(AttnProcsLayers):
+            def forward(self, *args, **kwargs):
+                return unet(*args, **kwargs)
+
+        unet = _Wrapper(unet.attn_processors)
+
+        return pipeline_trained
+
     @torch.no_grad()
     def aud2latent(self, audio_path, audio_length_in_s):
         DEVICE = torch.device(
@@ -948,7 +949,8 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
     @torch.no_grad()
     def ddim_inversion(self, start_latents, prompt_embeds, attention_mask, generated_prompt_embeds, guidance_scale,num_inference_steps): 
         start_step = 0
-        num_inference_steps = num_inference_steps
+        # print(f"Scheduler timesteps: {self.scheduler.timesteps}")
+        num_inference_steps = min(num_inference_steps, int(max(self.scheduler.timesteps)))
         device = start_latents.device
         self.scheduler.set_timesteps(num_inference_steps, device=device)
         start_latents *= self.scheduler.init_noise_sigma
@@ -967,9 +969,7 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
     def generate_morphing_prompt(self, prompt_1, prompt_2, alpha):
         closer_prompt = prompt_1 if alpha <= 0.5 else prompt_2
         prompt = (
-            f"A musical performance morphing between '{prompt_1}' and '{prompt_2}'. "
-            f"The sound is closer to '{closer_prompt}' with an interpolation factor of alpha={alpha:.2f}, "
-            f"where alpha=0 represents fully the {prompt_1} and alpha=1 represents fully {prompt_2}."
+            f"Jazz style music"
         )
         return prompt
 
@@ -977,8 +977,24 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
     def cal_latent(self,audio_length_in_s,time_pooling, freq_pooling,num_inference_steps, guidance_scale, aud_noise_1, aud_noise_2, prompt_1, prompt_2, 
                    prompt_embeds_1, attention_mask_1, generated_prompt_embeds_1, prompt_embeds_2, attention_mask_2, generated_prompt_embeds_2,
                    alpha, original_processor,attn_processor_dict, use_morph_prompt, morphing_with_lora):
+        num_inference_steps = min(num_inference_steps, int(max(self.pipeline_trained.scheduler.timesteps)))
         latents = slerp(aud_noise_1, aud_noise_2, alpha, self.use_adain)
+        # vocoder_upsample_factor = np.prod(self.vocoder.config.upsample_rates) / self.vocoder.config.sampling_rate
+        # height = int(audio_length_in_s / vocoder_upsample_factor)
+        # num_channels_latents = self.unet.config.in_channels
+        # device = latents.device
+        # generator = None
+        # latents = self.prepare_latents(
+        #     1,
+        #     num_channels_latents,
+        #     height,
+        #     prompt_embeds_1.dtype,
+        #     device,
+        #     generator,
+        #     # latents,
+        # )
         if not use_morph_prompt:
+            print("Not using morphing prompt")
             max_length = max(prompt_embeds_1.shape[1], prompt_embeds_2.shape[1])
             if prompt_embeds_1.shape[1] < max_length:
                 pad_size = max_length - prompt_embeds_1.shape[1]
@@ -1027,8 +1043,8 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
             # attention_mask = (attention_mask > 0.5).long()
 
             if morphing_with_lora:
-                pipeline_trained.unet.set_attn_processor(attn_processor_dict)
-            waveform = pipeline_trained(
+                self.pipeline_trained.unet.set_attn_processor(attn_processor_dict)
+            waveform = self.pipeline_trained(
                 time_pooling= time_pooling,
                 freq_pooling= freq_pooling,
                 latents = latents,
@@ -1044,13 +1060,13 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                 negative_attention_mask = attention_mask.chunk(2)[0],
             ).audios[0]
             if morphing_with_lora:
-                pipeline_trained.unet.set_attn_processor(original_processor)
+                self.pipeline_trained.unet.set_attn_processor(original_processor)
         else:
             latent_model_input = latents
             morphing_prompt = self.generate_morphing_prompt(prompt_1, prompt_2, alpha)
             if morphing_with_lora:
-                pipeline_trained.unet.set_attn_processor(attn_processor_dict)
-            waveform = pipeline_trained(
+                self.pipeline_trained.unet.set_attn_processor(attn_processor_dict)
+            waveform = self.pipeline_trained(
                 time_pooling= time_pooling,
                 freq_pooling= freq_pooling,
                 latents = latent_model_input,
@@ -1062,15 +1078,18 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                 negative_prompt= 'Low quality',
             ).audios[0]
             if morphing_with_lora:
-                pipeline_trained.unet.set_attn_processor(original_processor)
+                self.pipeline_trained.unet.set_attn_processor(original_processor)
         
-        return waveform
+        return waveform, latents
     
     @torch.no_grad()
     def __call__(
         self,
+        dtype,
         audio_file = None,
         audio_file2 = None,
+        ap_scale = 1.0,
+        text_ap_scale = 1.0,
         save_lora_dir = "./lora",
         load_lora_path_1 = None,
         load_lora_path_2 = None,
@@ -1094,7 +1113,6 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
         attn_beta=0,
         lamd=0.6,
         fix_lora=None,
-        save_intermediates=True,
         num_frames=50,
         max_new_tokens: Optional[int] = None,
         callback_steps: Optional[int] = 1,
@@ -1102,6 +1120,8 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
         morphing_with_lora=False,
         use_morph_prompt=False,
     ):  
+        ap_adapter_path = '/Data/home/Dennis/DeepMIR-2024/Final_Project/AP-adapter/pytorch_model.bin'
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         # 0. Load the pre-trained AP-adapter model
         layer_num = 0
         cross = [None, None, 768, 768, 1024, 1024, None, None]
@@ -1116,7 +1136,6 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
             elif name.startswith("down_blocks"):
                 block_id = int(name[len("down_blocks.")])
                 hidden_size = self.unet.config.block_out_channels[block_id]
-            
             if cross_attention_dim is None:
                 attn_procs[name] = AttnProcessor2_0()
             else:
@@ -1127,31 +1146,27 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                         hidden_size=hidden_size,
                         name=name,
                         cross_attention_dim=cross_attention_dim,
-                        scale=0.5,
+                        text_scale=text_ap_scale,
+                        scale=ap_scale,
                         num_tokens=8,
                         do_copy=False
-                    ).to("cuda", dtype=torch.float32)
+                    ).to("cuda", dtype=dtype)
                 else:
                     attn_procs[name] = AttnProcessor2_0()
-
-        state_dict = torch.load('/Data/home/Dennis/DeepMIR-2024/Final_Project/AP-adapter/pytorch_model.bin', map_location="cuda")
+        state_dict = torch.load(ap_adapter_path, map_location=device)
         for name, processor in attn_procs.items():
             if hasattr(processor, 'to_v_ip') or hasattr(processor, 'to_k_ip'):
                 weight_name_v = name + ".to_v_ip.weight"
                 weight_name_k = name + ".to_k_ip.weight"
-                processor.to_v_ip.weight = torch.nn.Parameter(state_dict[weight_name_v].half())
-                processor.to_k_ip.weight = torch.nn.Parameter(state_dict[weight_name_k].half())
+                if dtype == torch.float32:
+                    processor.to_v_ip.weight = torch.nn.Parameter(state_dict[weight_name_v].float())
+                    processor.to_k_ip.weight = torch.nn.Parameter(state_dict[weight_name_k].float())
+                elif dtype == torch.float16:
+                    processor.to_v_ip.weight = torch.nn.Parameter(state_dict[weight_name_v].half())
+                    processor.to_k_ip.weight = torch.nn.Parameter(state_dict[weight_name_k].half())
         self.unet.set_attn_processor(attn_procs)
-        self.vae= self.vae.to("cuda", dtype=torch.float32)
-        self.unet = self.unet.to("cuda", dtype=torch.float32)
-        self.language_model = self.language_model.to("cuda", dtype=torch.float32)
-        self.projection_model = self.projection_model.to("cuda", dtype=torch.float32)
-        self.vocoder = self.vocoder.to("cuda", dtype=torch.float32)
-        self.text_encoder = self.text_encoder.to("cuda", dtype=torch.float32)
-        self.text_encoder_2 = self.text_encoder_2.to("cuda", dtype=torch.float32)
+        self.pipeline_trained = self.init_trained_pipeline(ap_adapter_path, device, dtype, ap_scale, text_ap_scale)
 
-
-        
         # 1. Pre-check
         height, original_waveform_length = self.pre_check(audio_length_in_s, prompt_1, callback_steps, negative_prompt_1)
         _, _ = self.pre_check(audio_length_in_s, prompt_2, callback_steps, negative_prompt_2)
@@ -1172,7 +1187,7 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                 weight_name = f"{output_path.split('/')[-1]}_lora_0.ckpt"
                 load_lora_path_1 = save_lora_dir + "/" + weight_name
                 if not os.path.exists(load_lora_path_1):
-                    train_lora(audio_file ,height ,time_pooling ,freq_pooling ,prompt_1, negative_prompt_1, guidance_scale, save_lora_dir, self.tokenizer, self.tokenizer_2,
+                    train_lora(audio_file, dtype, time_pooling ,freq_pooling ,prompt_1, negative_prompt_1, guidance_scale, save_lora_dir, self.tokenizer, self.tokenizer_2,
                         self.text_encoder, self.text_encoder_2, self.language_model, self.projection_model, self.vocoder,
                         self.vae, self.unet, self.scheduler, lora_steps, lora_lr, lora_rank, weight_name=weight_name)
             print(f"Load from {load_lora_path_1}.")
@@ -1187,7 +1202,7 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                 weight_name = f"{output_path.split('/')[-1]}_lora_1.ckpt"
                 load_lora_path_2 = save_lora_dir + "/" + weight_name
                 if not os.path.exists(load_lora_path_2):
-                    train_lora(audio_file2 ,height,time_pooling ,freq_pooling ,prompt_2, negative_prompt_2, guidance_scale, save_lora_dir, self.tokenizer, self.tokenizer_2,
+                    train_lora(audio_file2, dtype,time_pooling ,freq_pooling ,prompt_2, negative_prompt_2, guidance_scale, save_lora_dir, self.tokenizer, self.tokenizer_2,
                         self.text_encoder, self.text_encoder_2, self.language_model, self.projection_model, self.vocoder,
                         self.vae, self.unet, self.scheduler, lora_steps, lora_lr, lora_rank, weight_name=weight_name)
             print(f"Load from {load_lora_path_2}.")
@@ -1211,70 +1226,54 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
 
         if noisy_latent_with_lora:
             self.unet = load_lora(self.unet, lora_1, lora_2, 0)
-        # print(self.unet.attn_processors)
         # We directly use the latent representation of the audio file for VAE's decoder as the 1st ground truth
         audio_latent = self.aud2latent(audio_file, audio_length_in_s).to(device)
-        # mel_spectrogram = self.vae.decode(audio_latent).sample
-        # first_audio = self.mel_spectrogram_to_waveform(mel_spectrogram)
-        # first_audio = first_audio[:, :original_waveform_length]
-        # torchaudio.save(f"{self.output_path}/{0:02d}_gt.wav", first_audio, 16000)
+        # waveform = self.pipeline_trained(
+        #         audio_file = audio_file,
+        #         time_pooling= time_pooling,
+        #         freq_pooling= freq_pooling,
+        #         num_inference_steps= num_inference_steps,
+        #         guidance_scale= guidance_scale,
+        #         num_waveforms_per_prompt= 1,
+        #         audio_length_in_s=audio_length_in_s,
+        #         prompt= self.generate_morphing_prompt(prompt_1, prompt_2, 0),
+        #         negative_prompt= 'Low quality',
+        #     ).audios[0]
+        # file_path = os.path.join(self.output_path, f"{0:02d}_apadapter.wav")
+        # scipy.io.wavfile.write(file_path, rate=16000, data=waveform)
         
         # aud_noise_1 is the noisy latent representation of the audio file 1
         aud_noise_1 = self.ddim_inversion(audio_latent, prompt_embeds_1, attention_mask_1, generated_prompt_embeds_1, guidance_scale, num_inference_steps)
-        # We use the pre-trained model to generate the audio file from the noisy latent representation
-        # waveform = pipeline_trained(
-        #     audio_file = audio_file,
-        #     time_pooling= 2,
-        #     freq_pooling= 2,
-        #     prompt= prompt_1,
-        #     latents = aud_noise_1,
-        #     negative_prompt= negative_prompt_1,
-        #     num_inference_steps= 100,
-        #     guidance_scale= guidance_scale,
-        #     num_waveforms_per_prompt= 1,
-        #     audio_length_in_s=10,
-        # ).audios
-        # file_path = os.path.join(self.output_path, f"{0:02d}_gt2.wav")
-        # scipy.io.wavfile.write(file_path, rate=16000, data=waveform[0])
-        
         # After reconstructed the audio file 1, we set the original processor back
         if noisy_latent_with_lora:
             self.unet.set_attn_processor(original_processor)
-        # print(self.unet.attn_processors)
         
         # For the second audio file
         if noisy_latent_with_lora:
             self.unet = load_lora(self.unet, lora_1, lora_2, 1)
-        # print(self.unet.attn_processors)
         # We directly use the latent representation of the audio file for VAE's decoder as the 1st ground truth
         audio_latent = self.aud2latent(audio_file2, audio_length_in_s)
-        # mel_spectrogram = self.vae.decode(audio_latent).sample
-        # last_audio = self.mel_spectrogram_to_waveform(mel_spectrogram)
-        # last_audio = last_audio[:, :original_waveform_length]
-        # torchaudio.save(f"{self.output_path}/{num_frames-1:02d}_gt.wav", last_audio, 16000)
         # aud_noise_2 is the noisy latent representation of the audio file 2
         aud_noise_2 = self.ddim_inversion(audio_latent, prompt_embeds_2, attention_mask_2, generated_prompt_embeds_2, guidance_scale, num_inference_steps)
-        # waveform = pipeline_trained(
-        #     audio_file = audio_file2,
-        #     time_pooling= 2,
-        #     freq_pooling= 2,
-        #     prompt= prompt_2,
-        #     latents = aud_noise_2,
-        #     negative_prompt= negative_prompt_2,
-        #     num_inference_steps= 100,
-        #     guidance_scale= guidance_scale,
-        #     num_waveforms_per_prompt= 1,
-        #     audio_length_in_s=10,
-        # ).audios
-        # file_path = os.path.join(self.output_path, f"{num_frames-1:02d}_gt2.wav")
-        # scipy.io.wavfile.write(file_path, rate=16000, data=waveform[0])
         if noisy_latent_with_lora:
             self.unet.set_attn_processor(original_processor)
-        # print(self.unet.attn_processors)
         # After reconstructed the audio file 1, we set the original processor back
         original_processor = list(self.unet.attn_processors.values())[0]
         
-        
+        # waveform = self.pipeline_trained(
+        #     audio_file = audio_file2,
+        #     time_pooling= time_pooling,
+        #     freq_pooling= freq_pooling,
+        #     num_inference_steps= num_inference_steps,
+        #     guidance_scale= guidance_scale,
+        #     num_waveforms_per_prompt= 1,
+        #     audio_length_in_s=audio_length_in_s,
+        #     prompt= self.generate_morphing_prompt(prompt_1, prompt_2, 1),
+        #     negative_prompt= 'Low quality',
+        # ).audios[0]
+        # file_path = os.path.join(self.output_path, f"{num_frames-1:02d}_apadapter.wav")
+        # scipy.io.wavfile.write(file_path, rate=16000, data=waveform)
+
         def morph(alpha_list, desc):
             audios = []
             # if attn_beta is not None:
@@ -1282,11 +1281,9 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                 self.unet = load_lora(
                     self.unet, lora_1, lora_2, 0 if fix_lora is None else fix_lora)
             attn_processor_dict = {}
-            # print(self.unet.attn_processors)
             for k in self.unet.attn_processors.keys():
                 # print(k)
                 if do_replace_attn(k):
-                    # print(f"Since the key starts with *up*, we replace the processor with StoreProcessor.")
                     if self.use_lora:
                         attn_processor_dict[k] = StoreProcessor(self.unet.attn_processors[k],
                                                                 self.aud1_dict, k)
@@ -1294,16 +1291,8 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                         attn_processor_dict[k] = StoreProcessor(original_processor,
                                                                 self.aud1_dict, k)
                 else:
-                    attn_processor_dict[k] = self.unet.attn_processors[k]
-            #     print(attn_processor_dict)
-            
-            # print(attn_processor_dict)
-
-            # print(self.unet.attn_processors)
-            # self.unet.set_attn_processor(attn_processor_dict)
-            # print(self.unet.attn_processors)
-            
-            first_audio = self.cal_latent(
+                    attn_processor_dict[k] = self.unet.attn_processors[k]            
+            first_audio, first_latents = self.cal_latent(
                 audio_length_in_s,
                 time_pooling,
                 freq_pooling,
@@ -1328,15 +1317,15 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
 
             self.unet.set_attn_processor(original_processor)
             file_path = os.path.join(self.output_path, f"{0:02d}.wav")
+            # latent_file_path = os.path.join(self.output_path, f"{0:02d}.npy")
+            # np.save(latent_file_path, first_latents.cpu().numpy())
             scipy.io.wavfile.write(file_path, rate=16000, data=first_audio)
-
             if self.use_lora:
                 self.unet = load_lora(
                     self.unet, lora_1, lora_2, 1 if fix_lora is None else fix_lora)
             attn_processor_dict = {}
             for k in self.unet.attn_processors.keys():
                 if do_replace_attn(k):
-                    # print(f"Since the key starts with *up*, we replace the processor with StoreProcessor.")
                     if self.use_lora:
                         attn_processor_dict[k] = StoreProcessor(self.unet.attn_processors[k],
                                                                 self.aud2_dict, k)
@@ -1345,8 +1334,7 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                                                                 self.aud2_dict, k)
                 else:
                     attn_processor_dict[k] = self.unet.attn_processors[k]
-            # self.unet.set_attn_processor(attn_processor_dict)
-            last_audio = self.cal_latent(
+            last_audio, last_latents = self.cal_latent(
                 audio_length_in_s,
                 time_pooling,
                 freq_pooling,
@@ -1369,7 +1357,10 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                 morphing_with_lora
             )
             file_path = os.path.join(self.output_path, f"{num_frames-1:02d}.wav")
+            # latent_file_path = os.path.join(self.output_path, f"{num_frames-1:02d}.npy")
+            # np.save(latent_file_path, last_latents.cpu().numpy())
             scipy.io.wavfile.write(file_path, rate=16000, data=last_audio)
+
             self.unet.set_attn_processor(original_processor)
             
             for i in tqdm(range(1, num_frames - 1), desc=desc):
@@ -1389,8 +1380,7 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                                 original_processor, k, self.aud1_dict, self.aud2_dict, alpha, attn_beta, lamd)
                     else:
                         attn_processor_dict[k] = self.unet.attn_processors[k]
-                # self.unet.set_attn_processor(attn_processor_dict)
-                audio = self.cal_latent(
+                audio, latents = self.cal_latent(
                         audio_length_in_s,
                         time_pooling,
                         freq_pooling,
@@ -1413,6 +1403,8 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                         morphing_with_lora
                     )
                 file_path = os.path.join(self.output_path, f"{i:02d}.wav")
+                # latent_file_path = os.path.join(self.output_path, f"{i:02d}.npy")
+                # np.save(latent_file_path, latents.cpu().numpy())
                 scipy.io.wavfile.write(file_path, rate=16000, data=audio)
                 self.unet.set_attn_processor(original_processor)
                 audios.append(audio)
