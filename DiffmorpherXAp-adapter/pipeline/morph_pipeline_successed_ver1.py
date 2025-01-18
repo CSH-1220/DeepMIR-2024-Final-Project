@@ -873,7 +873,7 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
 
         return prompt_embeds, attention_mask, generated_prompt_embeds
 
-    def init_trained_pipeline(self, model_path, device, dtype, ap_scale):
+    def init_trained_pipeline(self, model_path, device, dtype, ap_scale, text_ap_scale):
         pipeline_trained = AudioLDM2Pipeline.from_pretrained("cvssp/audioldm2-large", torch_dtype=dtype).to(device)
         layer_num = 0
         cross = [None, None, 768, 768, 1024, 1024, None, None]
@@ -899,7 +899,9 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                     attn_procs[name] = IPAttnProcessor2_0(
                         hidden_size=hidden_size,
                         name=name,
+                        flag='trained',
                         cross_attention_dim=cross_attention_dim,
+                        text_scale=text_ap_scale,
                         scale=ap_scale,
                         num_tokens=8,
                         do_copy=False
@@ -1049,7 +1051,7 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                 freq_pooling= freq_pooling,
                 latents = latents,
                 num_inference_steps= num_inference_steps,
-                guidance_scale= guidance_scale,
+                guidance_scale = guidance_scale,
                 num_waveforms_per_prompt= 1,
                 audio_length_in_s=audio_length_in_s,
                 prompt_embeds = prompt_embeds.chunk(2)[1],
@@ -1120,7 +1122,7 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
         morphing_with_lora=False,
         use_morph_prompt=False,
     ):  
-        ap_adapter_path = '/Data/home/Dennis/DeepMIR-2024/Final_Project/AP-adapter/pytorch_model.bin'
+        ap_adapter_path = '/Data/home/Dennis/DeepMIR-2024/Reference/AP-adapter/pytorch_model.bin'
         device = "cuda" if torch.cuda.is_available() else "cpu"
         # 0. Load the pre-trained AP-adapter model
         layer_num = 0
@@ -1142,15 +1144,15 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
                 cross_attention_dim = cross[layer_num % 8]
                 layer_num += 1
                 if cross_attention_dim == 768:
-                    attn_procs[name] = IPAttnProcessor2_0(
+                    attn_procs[name].scale = IPAttnProcessor2_0(
                         hidden_size=hidden_size,
                         name=name,
                         cross_attention_dim=cross_attention_dim,
-                        text_scale=text_ap_scale,
+                        text_scale=100,
                         scale=ap_scale,
                         num_tokens=8,
                         do_copy=False
-                    ).to("cuda", dtype=dtype)
+                    ).to(device, dtype=dtype)
                 else:
                     attn_procs[name] = AttnProcessor2_0()
         state_dict = torch.load(ap_adapter_path, map_location=device)
@@ -1243,7 +1245,7 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
         # scipy.io.wavfile.write(file_path, rate=16000, data=waveform)
         
         # aud_noise_1 is the noisy latent representation of the audio file 1
-        aud_noise_1 = self.ddim_inversion(audio_latent, prompt_embeds_1, attention_mask_1, generated_prompt_embeds_1, guidance_scale, num_inference_steps)
+        aud_noise_1 = self.ddim_inversion(audio_latent, prompt_embeds_1, attention_mask_1, generated_prompt_embeds_1, guidance_scale, num_inference_steps = num_inference_steps)
         # After reconstructed the audio file 1, we set the original processor back
         if noisy_latent_with_lora:
             self.unet.set_attn_processor(original_processor)
@@ -1254,7 +1256,7 @@ class AudioLDM2MorphPipeline(DiffusionPipeline,TextualInversionLoaderMixin):
         # We directly use the latent representation of the audio file for VAE's decoder as the 1st ground truth
         audio_latent = self.aud2latent(audio_file2, audio_length_in_s)
         # aud_noise_2 is the noisy latent representation of the audio file 2
-        aud_noise_2 = self.ddim_inversion(audio_latent, prompt_embeds_2, attention_mask_2, generated_prompt_embeds_2, guidance_scale, num_inference_steps)
+        aud_noise_2 = self.ddim_inversion(audio_latent, prompt_embeds_2, attention_mask_2, generated_prompt_embeds_2, guidance_scale, num_inference_steps = num_inference_steps)
         if noisy_latent_with_lora:
             self.unet.set_attn_processor(original_processor)
         # After reconstructed the audio file 1, we set the original processor back

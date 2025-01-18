@@ -309,7 +309,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
             the weight scale of image prompt.
     """
 
-    def __init__(self, hidden_size, name, cross_attention_dim=None, num_tokens=4, text_scale = 1.0 , scale=1.0, do_copy = False):
+    def __init__(self, hidden_size, name, flag = 'normal', cross_attention_dim=None, num_tokens=4, text_scale = 1.0 , scale=1.0, do_copy = False):
         super().__init__()
 
         if not hasattr(F, "scaled_dot_product_attention"):
@@ -325,6 +325,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
         self.to_k_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
         self.to_v_ip = nn.Linear(cross_attention_dim or hidden_size, hidden_size, bias=False)
         self.name = name
+        self.flag = flag
         # Below is for copying the weight of the original weight to the \
         if do_copy:
             print("do copy")
@@ -357,7 +358,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
         if scale != 1.0:
             logger.warning("`scale` of IPAttnProcessor should be set by `set_ip_adapter_scale`.")
         residual = hidden_states
-        # print("original encoder_hidden_states",encoder_hidden_states.shape)
+        print("original encoder_hidden_states",encoder_hidden_states.shape)
         if attn.spatial_norm is not None:
             hidden_states = attn.spatial_norm(hidden_states, temb)
 
@@ -452,6 +453,7 @@ class IPAttnProcessor2_0(torch.nn.Module):
         ip_hidden_states = ip_hidden_states.to(query.dtype)
         # print("hidden_states",hidden_states)
         # print("ip_hidden_states",ip_hidden_states)
+        print(f'{self.flag} Hello, I pass here!')
         hidden_states = self.text_scale * hidden_states + self.scale * ip_hidden_states
         # print("ip_hidden_states",ip_hidden_states.shape)
         # linear proj

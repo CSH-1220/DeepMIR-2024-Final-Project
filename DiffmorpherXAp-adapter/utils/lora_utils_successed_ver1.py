@@ -665,7 +665,7 @@ def train_lora(audio_path ,dtype ,time_pooling ,freq_pooling ,prompt, negative_p
         safe_serialization=safe_serialization
     )
     
-def load_lora(unet, lora_0, lora_1, alpha):
+def load_lora(unet, lora_0, lora_1, alpha, dtype):
     attn_procs = unet.attn_processors
     for name, processor in attn_procs.items():
         if hasattr(processor, 'to_v_ip') or hasattr(processor, 'to_k_ip'):
@@ -673,10 +673,16 @@ def load_lora(unet, lora_0, lora_1, alpha):
             weight_name_k = name + ".to_k_ip.weight"
             if weight_name_v in lora_0 and weight_name_v in lora_1:
                 v_weight = (1 - alpha) * lora_0[weight_name_v] + alpha * lora_1[weight_name_v]
-                processor.to_v_ip.weight = torch.nn.Parameter(v_weight.half())
+                if dtype == torch.float32:
+                    processor.to_v_ip.weight = torch.nn.Parameter(v_weight.float()) 
+                elif dtype == torch.float16:
+                    processor.to_v_ip.weight = torch.nn.Parameter(v_weight.half())
             
             if weight_name_k in lora_0 and weight_name_k in lora_1:
                 k_weight = (1 - alpha) * lora_0[weight_name_k] + alpha * lora_1[weight_name_k]
-                processor.to_k_ip.weight = torch.nn.Parameter(k_weight.half())
+                if dtype == torch.float32:
+                    processor.to_k_ip.weight = torch.nn.Parameter(k_weight.float())
+                elif dtype == torch.float16:
+                    processor.to_k_ip.weight = torch.nn.Parameter(k_weight.half())
     unet.set_attn_processor(attn_procs)
     return unet
